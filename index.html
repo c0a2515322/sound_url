@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>音響通信 - 送受信デモ (v18 - 最終ロジック)</title>
+    <title>音響通信 - 送受信デモ (v25 - 絶対同期版)</title>
     <style>
         body {
             font-family: sans-serif;
@@ -39,6 +39,10 @@
             margin-right: 8px;
         }
 
+        #resetButton {
+            background: #ffc107;
+        }
+
         #status-rx {
             color: #007bff;
         }
@@ -55,6 +59,27 @@
             color: #dc3545;
             font-weight: bold;
         }
+
+        #charLog {
+            height: 100px;
+            overflow-y: scroll;
+            border: 1px solid #eee;
+            padding: 5px;
+            background: #f8f9fa;
+        }
+
+        .log-entry {
+            margin-bottom: 3px;
+        }
+
+        .log-tx {
+            color: #007bff;
+            font-weight: bold;
+        }
+
+        .log-rx {
+            color: #dc3545;
+        }
     </style>
 </head>
 
@@ -67,7 +92,7 @@
 
         <div class="section">
             <h2>送信側 (Sender)</h2>
-            <input type="text" id="urlInput" value="a" style="width: 300px;">
+            <input type="text" id="urlInput" value="https://www.teu.ac.jp/" style="width: 300px;">
             <button id="sendButton">送信</button>
             <p>ステータス: <span id="status-tx">待機中</span></p>
         </div>
@@ -75,33 +100,48 @@
         <div class="section">
             <h2>受信側 (Receiver)</h2>
             <button id="listenButton">受信開始</button>
+            <button id="resetButton">リセット</button>
             <p>ステータス: <span id="status-rx">待機中</span></p>
             <p><b>受信バイナリ:</b> <span id="binaryResult"></span></p>
             <p><b>受信テキスト:</b> <span id="textResult"></span></p>
-            <p style="font-size: 0.8em; color: #666;">（HTMLデバッグ: <span id="debug-volume">...</span>）</p>
+
+            <h4>受信ログ (比較用)</h4>
+            <div id="charLog"></div>
+
+            <p style="font-size: 0.8em; color: #666; margin-top: 15px;">（HTMLデバッグ: <span id="debug-volume">...</span>）
+            </p>
         </div>
     </div>
 
     <script>
-        // --- 共通設定 (▼▼▼ START/ENDを統合 ▼▼▼) ---
+        // --- 共通設定 (v17の安定設定) ---
         const FREQ_0 = 1750; // '0' の周波数 (Hz)
         const FREQ_1 = 2000; // '1' の周波数 (Hz)
         const FREQ_START = 1500; // 開始信号
-        const FREQ_END = 1500; // 終了信号 (STARTと同じ)
+        const FREQ_END = 2250; // 終了信号 (分離)
 
         const START_DURATION = 500; // 開始信号の長さ (ミリ秒)
         const END_DURATION = 500;   // 終了信号の長さ (ミリ秒)
         const BIT_DURATION = 400; // 1ビットあたりの再生時間 (ミリ秒)
+        const CHAR_PAUSE = 400; // 文字間ポーズ
 
-        // ▼▼▼ 成功したしきい値を維持 ▼▼▼
-        const THRESHOLD = -85;
+        const THRESHOLD = -85; // 成功したしきい値を維持
         // ---
 
-        // === 送信側 (SENDER) のロジック ===
+        // === UI要素 (グローバル) ===
         const sendButton = document.getElementById('sendButton');
         const urlInput = document.getElementById('urlInput');
         const statusTx = document.getElementById('status-tx');
+        const listenButton = document.getElementById('listenButton');
+        const statusRx = document.getElementById('status-rx');
+        const binaryResult = document.getElementById('binaryResult');
+        const textResult = document.getElementById('textResult');
+        const debugVolume = document.getElementById('debug-volume');
+        const resetButton = document.getElementById('resetButton');
+        const charLog = document.getElementById('charLog');
 
+
+        // === 送信側 (SENDER) のロジック ===
         let txAudioContext;
 
         async function playTone(frequency, duration) {
@@ -115,7 +155,7 @@
 
             const gainNode = txAudioContext.createGain();
             gainNode.gain.setValueAtTime(0, txAudioContext.currentTime);
-            gainNode.gain.linearRampToValueAtTime(1.0, txAudioContext.currentTime + 0.01); // 音量最大
+            gainNode.gain.linearRampToValueAtTime(1.0, txAudioContext.currentTime + 0.01);
             gainNode.gain.linearRampToValueAtTime(0, txAudioContext.currentTime + (duration / 1000) - 0.01);
 
             oscillator.connect(gainNode);
@@ -127,11 +167,11 @@
             return new Promise(resolve => setTimeout(resolve, duration));
         }
 
-        function stringToBinary(str) {
+        function stringToBinaryArray(str) {
             return str.split('').map(char => {
                 const bin = char.charCodeAt(0).toString(2);
                 return '0'.repeat(8 - bin.length) + bin;
-            }).join('');
+            });
         }
 
         sendButton.onclick = async () => {
@@ -145,36 +185,46 @@
                 return;
             }
 
-            const binaryData = stringToBinary(textToSend);
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry log-tx';
+            logEntry.textContent = `[送信 S:] ${textToSend}`;
+            charLog.appendChild(logEntry);
+            charLog.scrollTop = charLog.scrollHeight;
+
+            const binaryChars = stringToBinaryArray(textToSend);
             statusTx.textContent = '送信中...';
             sendButton.disabled = true;
 
-            await playTone(FREQ_START, START_DURATION); // 1. 開始信号
-            for (const bit of binaryData) { // 2. データ信号
-                const freq = (bit === '0') ? FREQ_0 : FREQ_1;
-                await playTone(freq, BIT_DURATION);
-            }
-            await playTone(FREQ_END, END_DURATION); // 3. 終了信号
+            await playTone(FREQ_START, START_DURATION);
 
-            statusTx.textContent = `送信完了: ${binaryData.length} ビット`;
+            for (const charBits of binaryChars) {
+                for (const bit of charBits) {
+                    const freq = (bit === '0') ? FREQ_0 : FREQ_1;
+                    await playTone(freq, BIT_DURATION);
+                }
+                await new Promise(resolve => setTimeout(resolve, CHAR_PAUSE));
+            }
+
+            await playTone(FREQ_END, END_DURATION);
+
+            statusTx.textContent = `送信完了: ${binaryChars.length * 8} ビット`;
             sendButton.disabled = false;
         };
 
         // === 受信側 (RECEIVER) のロジック ===
-        const listenButton = document.getElementById('listenButton');
-        const statusRx = document.getElementById('status-rx');
-        const binaryResult = document.getElementById('binaryResult');
-        const textResult = document.getElementById('textResult');
-        const debugVolume = document.getElementById('debug-volume');
-
         let rxAudioContext;
         let analyser;
         let microphoneStream;
         let dataArray;
         let isListening = false;
         let receivedBinary = '';
-        let lastBitTime = 0;
+
         let receiveState = 'IDLE';
+        let nextBitStartTime = 0;
+        let expectedChars = 0;
+        let bitsReceived = 0;
+        // ▼▼▼ 絶対時刻の基準点を追加 ▼▼▼
+        let absoluteStartTime = 0;
 
         function binaryToString(bin) {
             let str = '';
@@ -198,72 +248,110 @@
             const freq0Index = Math.round(FREQ_0 / targetBinSize);
             const freq1Index = Math.round(FREQ_1 / targetBinSize);
             const freqStartIndex = Math.round(FREQ_START / targetBinSize);
-            // FREQ_END は FREQ_START と同じ
+            const freqEndIndex = Math.round(FREQ_END / targetBinSize);
 
             const freq0Db = dataArray[freq0Index];
             const freq1Db = dataArray[freq1Index];
             const freqStartDb = dataArray[freqStartIndex];
+            const freqEndDb = dataArray[freqEndIndex];
 
             const now = Date.now();
 
-            debugVolume.textContent = `Start/End(1.5k): ${freqStartDb.toFixed(1)}, F0(1.75k): ${freq0Db.toFixed(1)}, F1(2.0k): ${freq1Db.toFixed(1)}`;
+            debugVolume.textContent = `Start(1.5k): ${freqStartDb.toFixed(1)}, F0(1.75k): ${freq0Db.toFixed(1)}, F1(2.0k): ${freq1Db.toFixed(1)}, End(2.25k): ${freqEndDb.toFixed(1)}`;
 
             // 1. 待機状態 (IDLE): スタート信号を探す
             if (receiveState === 'IDLE') {
-                if (freqStartDb > THRESHOLD && freqStartDb > freq0Db && freqStartDb > freq1Db) {
+                if (freqStartDb > THRESHOLD && freqStartDb > freq0Db && freqStartDb > freq1Db && freqStartDb > freqEndDb) {
                     console.log(`--- スタート信号(1.5k)を検出！ (${freqStartDb.toFixed(1)}dB) ---`);
                     statusRx.textContent = '受信開始！';
                     receiveState = 'RECEIVING';
+
+                    absoluteStartTime = now; // ▼ 絶対時刻の基準点を記録
+                    expectedChars = urlInput.value.length;
+                    bitsReceived = 0;
+
                     receivedBinary = '';
                     binaryResult.textContent = '';
                     textResult.textContent = '';
-                    lastBitTime = now + (START_DURATION - 50);
+
+                    // 次のビット(Bit 0)のサンプリング時刻を設定
+                    // (スタート信号終了 + 1ビット目の中間地点)
+                    nextBitStartTime = absoluteStartTime + (START_DURATION - 50) + (BIT_DURATION / 2);
                 }
             }
-            // 2. 受信状態 (RECEIVING): 0, 1, または終了信号を探す
+            // 2. 受信状態 (RECEIVING): 決まった時刻にのみ判定
             else if (receiveState === 'RECEIVING') {
 
-                if (now - lastBitTime > (BIT_DURATION - 50)) { // 350ms 以上経過したら
+                // サンプリング時刻（nextBitStartTime）を過ぎたか？
+                if (now > nextBitStartTime) {
 
                     let bit = '';
 
-                    // 終了信号(1.5k)か？
-                    if (freqStartDb > THRESHOLD && freqStartDb > freq0Db && freqStartDb > freq1Db) {
-                        console.log(`--- 終了信号(1.5k)を検出！ (${freqStartDb.toFixed(1)}dB) ---`);
-                        statusRx.textContent = '受信完了（終了信号受信）';
-                        receiveState = 'IDLE';
-                        return;
-                    }
-
                     // '0' の信号(1.75k)か？
-                    else if (freq0Db > THRESHOLD && freq0Db > freqStartDb && freq0Db > freq1Db) {
+                    if (freq0Db > THRESHOLD && freq0Db > freqStartDb && freq0Db > freq1Db && freq0Db > freqEndDb) {
                         bit = '0';
-                        console.log(`ビット '0' (1.75k) を検出 (${freq0Db.toFixed(1)}dB)`);
+                        console.log(`ビット ${bitsReceived}: '0' (1.75k) を検出 (${freq0Db.toFixed(1)}dB)`);
                     }
-
                     // '1' の信号(2.0k)か？
-                    else if (freq1Db > THRESHOLD && freq1Db > freqStartDb && freq1Db > freq0Db) {
+                    else if (freq1Db > THRESHOLD && freq1Db > freqStartDb && freq1Db > freq0Db && freq1Db > freqEndDb) {
                         bit = '1';
-                        console.log(`ビット '1' (2.0k) を検出 (${freq1Db.toFixed(1)}dB)`);
+                        console.log(`ビット ${bitsReceived}: '1' (2.0k) を検出 (${freq1Db.toFixed(1)}dB)`);
                     }
-
-                    // どれでもない場合 (無音またはノイズ)
+                    // 信号が弱すぎる (ノイズ抑制された)
                     else {
-                        if (now - lastBitTime > 2000) { // 2秒間無音なら
-                            console.log("--- タイムアウト ---");
-                            statusRx.textContent = '受信完了（タイムアウト）';
-                            receiveState = 'IDLE';
-                            return;
-                        }
-                        return; // 判定をスキップ
+                        bit = '?'; // 不明なビット
+                        console.log(`ビット ${bitsReceived}: 信号検出失敗 (音量不足)`);
                     }
 
                     receivedBinary += bit;
                     binaryResult.textContent = receivedBinary;
-                    lastBitTime = now;
+                    bitsReceived++;
 
-                    if (receivedBinary.length % 8 === 0) {
+                    // 予定していた全ビットを受信したら、終了信号の待機に移る
+                    if (bitsReceived >= (expectedChars * 8)) {
+                        console.log("--- 全ビット受信完了、終了信号待機... ---");
+                        receiveState = 'WAIT_END';
+
+                        // ▼ 終了信号の「絶対時刻」を計算
+                        const charsReceived = bitsReceived / 8;
+                        const pausesSoFar = Math.max(0, charsReceived); // 最後の文字の後にもポーズがある
+                        nextBitStartTime = absoluteStartTime + START_DURATION + (BIT_DURATION * bitsReceived) + (CHAR_PAUSE * pausesSoFar) + (END_DURATION / 2);
+
+                    } else {
+                        // ▼ 次のビットの「絶対時刻」を再計算
+                        const charsSoFar = Math.floor(bitsReceived / 8);
+                        const pausesSoFar = charsSoFar; // 1文字(8bit)ごとにポーズ
+                        nextBitStartTime = absoluteStartTime + (START_DURATION - 50) + (BIT_DURATION * (bitsReceived + 0.5)) + (CHAR_PAUSE * pausesSoFar);
+                    }
+
+                    // 1文字(8bit)受信したか？
+                    if (bitsReceived > 0 && bitsReceived % 8 === 0) {
+                        const lastByte = receivedBinary.slice(-8);
+                        const lastChar = binaryToString(lastByte);
+
                         textResult.textContent = binaryToString(receivedBinary);
+
+                        const logEntry = document.createElement('div');
+                        logEntry.className = 'log-entry log-rx';
+                        logEntry.textContent = `[受信 R:] ${lastChar} (バイナリ: ${lastByte})`;
+                        charLog.appendChild(logEntry);
+                        charLog.scrollTop = charLog.scrollHeight;
+
+                        console.log(`--- 1文字認識: ${lastChar} ---`);
+                    }
+                }
+            }
+            // 3. 終了待機状態 (WAIT_END)
+            else if (receiveState === 'WAIT_END') {
+                if (now > nextBitStartTime) {
+                    if (freqEndDb > THRESHOLD && freqEndDb > freqStartDb && freqEndDb > freq0Db && freqEndDb > freq1Db) {
+                        console.log(`--- 終了信号(2.25k)を検出！ (${freqEndDb.toFixed(1)}dB) ---`);
+                        statusRx.textContent = '受信完了（終了信号受信）';
+                        receiveState = 'IDLE';
+                    } else {
+                        console.log("--- 終了信号の検出に失敗 ---");
+                        statusRx.textContent = '受信完了（終了信号なし）';
+                        receiveState = 'IDLE';
                     }
                 }
             }
@@ -318,6 +406,20 @@
                 stopListening();
             } else {
                 startListening();
+            }
+        };
+
+        resetButton.onclick = () => {
+            receivedBinary = '';
+            binaryResult.textContent = '';
+            textResult.textContent = '';
+            charLog.innerHTML = '';
+            statusRx.textContent = 'リセットしました';
+            if (isListening) {
+                receiveState = 'IDLE';
+                bitsReceived = 0;
+                expectedChars = 0;
+                absoluteStartTime = 0; // ▼ 追加
             }
         };
 
