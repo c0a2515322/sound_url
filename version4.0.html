@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>音響通信システム (Final Version)</title>
+    <title>音響通信システム (Final Version - 音色変更版)</title>
     <style>
         body {
             font-family: sans-serif;
@@ -62,7 +62,7 @@
 
 <body>
     <div class="container">
-        <h1>音響通信システム (Final Version)</h1>
+        <h1>音響通信システム (Final Version - 音色変更版)</h1>
         <div class="warning-box">
             <strong>最終的な使い方:</strong><br>
             このシステムは、2つのデバイス（PCとスマホなど）で動作するように設計されています。<br>
@@ -95,7 +95,7 @@
         const BIT_DURATION_MS = 40, CHAR_PAUSE_MS = 40;
         const SCRIPT_PROCESSOR_SIZE = 4096;
         const CORRELATION_THRESHOLD = 0.7; // 検出感度を少し上げた
-        const GAIN_VALUE = 5.0;
+        const GAIN_VALUE = 5.0; // 元の音量
 
         // UI要素
         const sendButton = document.getElementById('sendButton'), urlInput = document.getElementById('urlInput'),
@@ -108,7 +108,7 @@
         // 送信側 AudioContext (必要になったときに初期化)
         let txAudioContext = null;
 
-        // 送信処理 (AudioContextの初期化と再生)
+        // 送信処理 (AudioContextの初期化と再生) - 音色変更 & エンベロープ追加版
         async function playChirp(startFreq, endFreq, durationMs) {
             // AudioContextが存在しない、または中断されている場合は再開または作成
             if (!txAudioContext || txAudioContext.state === 'closed') {
@@ -118,21 +118,46 @@
                 await txAudioContext.resume(); // ユーザー操作後に再生可能にする
             }
 
-            const gainNode = txAudioContext.createGain();
-            gainNode.gain.value = GAIN_VALUE;
-            gainNode.connect(txAudioContext.destination);
-
             const oscillator = txAudioContext.createOscillator();
-            oscillator.type = 'sine';
+            // 波形を 'sine' から 'sawtooth' に変更 -> より「音」っぽい
+            oscillator.type = 'sawtooth';
+
+            // エンベロープ用のGainNode
+            const gainNode = txAudioContext.createGain();
+            gainNode.gain.value = 0; // 初期ゲインは0
+
+            // 周波数のチャープを設定
             oscillator.frequency.setValueAtTime(startFreq, txAudioContext.currentTime);
             oscillator.frequency.linearRampToValueAtTime(endFreq, txAudioContext.currentTime + durationMs / 1000);
 
-            oscillator.connect(gainNode);
-            oscillator.start();
-            oscillator.stop(txAudioContext.currentTime + durationMs / 1000);
+            // エンベロープ設定 (アタックとリリース)
+            const attackTime = 0.01; // アタック時間 (秒)
+            const releaseTime = 0.01; // リリース時間 (秒)
+            const startTime = txAudioContext.currentTime;
+            const endTime = startTime + durationMs / 1000;
 
-            return new Promise(resolve => setTimeout(resolve, durationMs));
+            // アタック: 音量を0から最大までスムーズに上げる
+            gainNode.gain.setValueAtTime(0, startTime);
+            gainNode.gain.linearRampToValueAtTime(GAIN_VALUE, startTime + attackTime);
+
+            // メイン音量 (ピーク維持): リリース直前まで最大音量
+            // gainNode.gain.setValueAtTime(GAIN_VALUE, endTime - releaseTime); // これだとリリースが途中で始まる
+
+            // リリース: 音量を最大から0までスムーズに下げる
+            gainNode.gain.setValueAtTime(GAIN_VALUE, endTime - releaseTime);
+            gainNode.gain.linearRampToValueAtTime(0, endTime);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(txAudioContext.destination);
+
+            oscillator.start();
+            oscillator.stop(endTime);
+
+            // Promiseの解決を、音が完全に終わるまで待つ
+            // リリース時間分と少し余裕をもたせる
+            return new Promise(resolve => setTimeout(resolve, durationMs + releaseTime * 1000 + 50));
         }
+
 
         sendButton.onclick = async () => {
             if (sendButton.disabled) return; // 連打防止
@@ -179,7 +204,7 @@
                 const t = i / sampleRate;
                 // チャープ信号の位相を計算 (線形チャープ)
                 const phase = 2 * Math.PI * (startFreq * t + (endFreq - startFreq) * t * t / (2 * durationSec));
-                buffer[i] = Math.sin(phase);
+                buffer[i] = Math.sin(phase); // これはテンプレートなので、相関計算用には正弦波のままでも問題ない
             }
             return buffer;
         }
@@ -218,7 +243,7 @@
         // 受信データ保持用変数
         let receivedBinary = '', nextBitTime = 0, receivedText = '', lastSyncTime = 0;
 
-        // 音声処理 (ScriptProcessorNodeで呼ばれる)
+        // 音声処理 (ScriptProcessorNodeで呼ばれる) - この部分は変更なし
         function processAudio(event) {
             if (!isListening) return;
 
@@ -293,7 +318,7 @@
             }
         }
 
-        // 受信開始処理
+        // 受信開始処理 - この部分は変更なし
         async function startListening() {
             if (isListening) return;
             statusRx.textContent = 'マイク準備中...';
@@ -317,6 +342,7 @@
                 console.log(`%c実際のサンプルレート: ${SAMPLE_RATE} Hz`, 'color: blue; font-size: 1.1em;');
 
                 // 各チャープのテンプレートを生成 (サンプルレートに合わせて)
+                // テンプレートは相関計算用なので、正弦波のままでも問題ない
                 syncTemplate = generateChirpTemplate(SAMPLE_RATE, SYNC_FREQ_START, SYNC_FREQ_END, SYNC_DURATION_MS);
                 data0Template = generateChirpTemplate(SAMPLE_RATE, DATA_FREQ_HIGH, DATA_FREQ_LOW, BIT_DURATION_MS);
                 data1Template = generateChirpTemplate(SAMPLE_RATE, DATA_FREQ_LOW, DATA_FREQ_HIGH, BIT_DURATION_MS);
@@ -345,7 +371,7 @@
             }
         }
 
-        // 受信停止処理
+        // 受信停止処理 - この部分は変更なし
         function stopListening() {
             if (!isListening) return;
             isListening = false;
@@ -363,7 +389,7 @@
             console.log('受信停止');
         }
 
-        // リセット処理
+        // リセット処理 - この部分は変更なし
         resetButton.onclick = () => {
             receiveState = 'IDLE';
             receivedBinary = '';
@@ -374,7 +400,7 @@
             console.log('受信状態をリセットしました。');
         };
 
-        // 受信開始/停止ボタンのトグル
+        // 受信開始/停止ボタンのトグル - この部分は変更なし
         listenButton.onclick = () => isListening ? stopListening() : startListening();
 
     </script>
